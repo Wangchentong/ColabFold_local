@@ -26,20 +26,6 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def stable_softmax(logits: jax.Array) -> jax.Array:
-  """Numerically stable softmax for (potential) bfloat 16."""
-  if logits.dtype == jnp.float32:
-    output = jax.nn.softmax(logits)
-  elif logits.dtype == jnp.bfloat16:
-    # Need to explicitly do softmax in float32 to avoid numerical issues
-    # with large negatives. Large negatives can occur if trying to mask
-    # by adding on large negative logits so that things softmax to zero.
-    output = jax.nn.softmax(logits.astype(jnp.float32)).astype(jnp.bfloat16)
-  else:
-    raise ValueError(f'Unexpected input dtype {logits.dtype}')
-  return output
-
-
 def bfloat16_creator(next_creator, shape, dtype, init, context):
   """Creates float32 variables when bfloat16 is requested."""
   if context.original_dtype == jnp.bfloat16:
@@ -106,17 +92,43 @@ def mask_mean(mask, value, axis=None, drop_mask_channel=False, eps=1e-10):
           (jnp.sum(mask, axis=axis) * broadcast_factor + eps))
 
 
-def flat_params_to_haiku(params: Mapping[str, np.ndarray]) -> hk.Params:
+def flat_params_to_haiku(params, fuse=True, to_jnp=True):
   """Convert a dictionary of NumPy arrays to Haiku parameters."""
-  hk_params = {}
+  P = {}
   for path, array in params.items():
     scope, name = path.split('//')
-    if scope not in hk_params:
-      hk_params[scope] = {}
-    hk_params[scope][name] = jnp.array(array)
-
-  return hk_params
-
+    if scope not in P:
+      P[scope] = {}
+    P[scope][name] = jnp.array(array) if to_jnp else array
+  for a in ["evoformer_iteration",
+            "extra_msa_stack",
+            "template_embedding/single_template_embedding/template_embedding_iteration",
+            "template_embedding/single_template_embedding/template_pair_stack/__layer_stack_no_state"]:
+    for b in ["triangle_multiplication_incoming","triangle_multiplication_outgoing"]:
+      k = f"alphafold/alphafold_iteration/evoformer/{a}/{b}"
+      
+      if fuse and f"{k}/center_layer_norm" in P:
+        for c in ["gate","projection"]:
+          L = P.pop(f"{k}/left_{c}")
+          R = P.pop(f"{k}/right_{c}")
+          P[f"{k}/{c}"] = {}
+          for d in ["bias","weights"]:
+            P[f"{k}/{c}"][d] = jnp.concatenate([L[d],R[d]],-1) if to_jnp else np.concatenate([L[d],R[d]],-1)
+        P[f"{k}/center_norm"] = P.pop(f"{k}/center_layer_norm")
+        P[f"{k}/left_norm_input"] = P.pop(f"{k}/layer_norm_input")
+      
+      if not fuse and f"{k}/center_norm" in P:
+        for c in ["gate","projection"]:
+          LR = P.pop(f"{k}/{c}")
+          P[f"{k}/left_{c}"] = {}
+          P[f"{k}/right_{c}"] = {}
+          for d in ["bias","weights"]:
+            half = LR[d].shape[-1] // 2
+            P[f"{k}/left_{c}"][d] = LR[d][...,:half]
+            P[f"{k}/right_{c}"][d] = LR[d][...,half:]
+        P[f"{k}/center_layer_norm"] = P.pop(f"{k}/center_norm")
+        P[f"{k}/layer_norm_input"] = P.pop(f"{k}/left_norm_input")
+  return P
 
 def padding_consistent_rng(f):
   """Modify any element-wise random function to be consistent with padding.
@@ -160,12 +172,8 @@ def padding_consistent_rng(f):
     return jax.vmap(functools.partial(grid_keys, shape=shape[1:]))(new_keys)
 
   def inner(key, shape, **kwargs):
-    keys = grid_keys(key, shape)
-    signature = (
-        '()->()' if isinstance(keys, jax.random.PRNGKeyArray) else '(2)->()'
-    )
     return jnp.vectorize(
-        functools.partial(f, shape=(), **kwargs), signature=signature
-    )(keys)
-
+        lambda key: f(key, shape=(), **kwargs),
+        signature='(2)->()')(
+            grid_keys(key, shape))
   return inner

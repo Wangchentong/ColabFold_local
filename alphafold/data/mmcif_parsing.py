@@ -21,7 +21,10 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from absl import logging
 from Bio import PDB
-from Bio.Data import SCOPData
+try:
+  from Bio.Data import PDBData
+except ImportError:
+  from Bio.Data import SCOPData as PDBData
 
 # Type aliases:
 ChainId = str
@@ -258,7 +261,7 @@ def parse(*,
       author_chain = mmcif_to_author_chain_id[chain_id]
       seq = []
       for monomer in seq_info:
-        code = SCOPData.protein_letters_3to1.get(monomer.id, 'X')
+        code = PDBData.protein_letters_3to1.get(monomer.id, 'X')
         seq.append(code if len(code) == 1 else 'X')
       seq = ''.join(seq)
       author_chain_to_sequence[author_chain] = seq
@@ -374,7 +377,7 @@ def _get_protein_chains(
     chain_ids = entity_to_mmcif_chains[entity_id]
 
     # Reject polymers without any peptide-like components, such as DNA/RNA.
-    if any(['peptide' in chem_comps[monomer.id]['_chem_comp.type'].lower()
+    if any(['peptide' in chem_comps[monomer.id]['_chem_comp.type']
             for monomer in seq_info]):
       for chain_id in chain_ids:
         valid_chains[chain_id] = seq_info

@@ -38,7 +38,7 @@ def get_model_haiku_params(
 
     path = os.path.join(data_dir, "params", file)
     params = np.load(path, allow_pickle=False)
-    return utils.flat_params_to_haiku(params, fuse=use_fuse, to_jnp=to_jnp)
+    return utils.flat_params_to_haiku(params)
 
 
 def model_to_config_name(model_type: str, model_number: str) -> str:
